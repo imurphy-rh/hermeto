@@ -14,7 +14,13 @@ from hermeto.core.errors import LockfileNotFound, PackageRejected
 from hermeto.core.models.input import Mode, Request
 from hermeto.core.models.output import Component, EnvironmentVariable, ProjectFile, RequestOutput
 from hermeto.core.models.property_semantics import Property, PropertyEnum
-from hermeto.core.models.sbom import Annotation, ExternalReference, create_backend_annotation
+from hermeto.core.models.sbom import (
+    PROXY_COMMENT,
+    PROXY_REF_TYPE,
+    Annotation,
+    ExternalReference,
+    create_backend_annotation,
+)
 from hermeto.core.package_managers.general import async_download_files
 from hermeto.core.package_managers.maven.models import (
     MavenArtifact,
@@ -183,7 +189,9 @@ def _generate_sbom_components(
 
         external_refs: list[ExternalReference] | None = None
         if proxy_url is not None:
-            external_refs = [ExternalReference(url=proxy_url, comment="proxy URL")]
+            external_refs = [
+                ExternalReference(url=proxy_url, type=PROXY_REF_TYPE, comment=PROXY_COMMENT)
+            ]
 
         component = Component(
             name=name,
@@ -246,6 +254,9 @@ def _download_maven_artifacts(
     _verify_artifact_sizes(original_to_path)
 
     pom_files, pom_checksums = _prepare_pom_and_checksum_downloads(deps_dir, artifacts)
+    if proxy_url:
+        pom_files = {_rewrite_url_for_proxy(u, proxy_url): p for u, p in pom_files.items()}
+        pom_checksums = {_rewrite_url_for_proxy(u, proxy_url): p for u, p in pom_checksums.items()}
     asyncio.run(async_download_files(pom_files, config.runtime.concurrency_limit))
     asyncio.run(_async_download_optional_files(pom_checksums))
 

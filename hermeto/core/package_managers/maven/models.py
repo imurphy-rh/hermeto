@@ -56,7 +56,7 @@ class MavenLockfile:
             )
 
         lock_version = data.get("lockFileVersion")
-        if lock_version is not None and lock_version != 1:
+        if lock_version is not None and (not isinstance(lock_version, int) or lock_version != 1):
             raise InvalidLockfileFormat(
                 path,
                 f"unsupported lockFileVersion: {lock_version} (expected 1)",
