@@ -6,7 +6,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from hermeto.core.errors import InvalidLockfileFormat, LockfileNotFound, UnexpectedFormat
+
 log = logging.getLogger(__name__)
+
+_REQUIRED_LOCKFILE_FIELDS = ("groupId", "artifactId", "version")
+_REQUIRED_ARTIFACT_FIELDS = (
+    "resolved",
+    "groupId",
+    "artifactId",
+    "version",
+    "checksumAlgorithm",
+    "checksum",
+)
 
 
 class MavenLockfile:
@@ -20,8 +32,32 @@ class MavenLockfile:
     @classmethod
     def from_file(cls, path: Path) -> "MavenLockfile":
         """Create a MavenLockfile object from the provided path."""
-        with path.open() as f:
-            data = json.load(f)
+        if not path.exists():
+            raise LockfileNotFound(
+                path,
+                solution="Generate a lockfile with: "
+                "mvn io.github.chains-project:maven-lockfile:generate",
+            )
+
+        try:
+            with path.open() as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise InvalidLockfileFormat(
+                path,
+                f"invalid JSON: {e}",
+                solution="Ensure lockfile.json contains valid JSON. "
+                "Regenerate with: mvn io.github.chains-project:maven-lockfile:generate",
+            ) from e
+
+        missing = [f for f in _REQUIRED_LOCKFILE_FIELDS if f not in data]
+        if missing:
+            raise InvalidLockfileFormat(
+                path,
+                f"missing required fields: {', '.join(missing)}",
+                solution="The lockfile appears incomplete. "
+                "Regenerate with: mvn io.github.chains-project:maven-lockfile:generate",
+            )
 
         return cls(path, data)
 
@@ -38,6 +74,15 @@ class MavenArtifact(UserDict):
 
     def __init__(self, data: dict[str, Any]) -> None:
         """Initialize a MavenArtifact object."""
+        missing = [f for f in _REQUIRED_ARTIFACT_FIELDS if f not in data]
+        if missing:
+            artifact_hint = data.get("artifactId", data.get("groupId", "unknown"))
+            raise UnexpectedFormat(
+                f"Maven artifact {artifact_hint!r} is missing required fields: {', '.join(missing)}",
+                solution="The lockfile contains an incomplete artifact entry. "
+                "Regenerate with: mvn io.github.chains-project:maven-lockfile:generate",
+            )
+
         self.url = data["resolved"]
         self.group_id = data["groupId"]
         self.artifact_id = data["artifactId"]

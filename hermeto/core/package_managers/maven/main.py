@@ -8,8 +8,10 @@ from urllib.parse import urlparse
 import aiohttp
 from packageurl import PackageURL
 
+from hermeto.core.checksum import ChecksumInfo, must_match_any_checksum
 from hermeto.core.config import get_config
-from hermeto.core.models.input import Request
+from hermeto.core.errors import LockfileNotFound, PackageRejected
+from hermeto.core.models.input import Mode, Request
 from hermeto.core.models.output import Component, EnvironmentVariable, ProjectFile, RequestOutput
 from hermeto.core.models.property_semantics import Property, PropertyEnum
 from hermeto.core.models.sbom import Annotation, create_backend_annotation
@@ -25,11 +27,15 @@ from hermeto.core.package_managers.maven.utils import (
     derive_pom_filename,
     derive_repository_id,
     get_checksum_algorithm,
+    validate_artifact_url,
+    validate_checksum_format,
 )
 
 log = logging.getLogger(__name__)
 
 DEFAULT_LOCKFILE = "lockfile.json"
+MAX_ARTIFACT_COUNT = 10_000
+MAX_ARTIFACT_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
 
 SETTINGS_XML_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,7 +64,9 @@ def fetch_maven_source(request: Request) -> RequestOutput:
 
     for package in request.maven_packages:
         project_dir = request.source_dir.join_within_root(package.path)
-        components.extend(_resolve_maven_project(project_dir.path, deps_dir.path))
+        result = _resolve_maven_project(project_dir.path, deps_dir.path, request.mode)
+        if result is not None:
+            components.extend(result)
 
     backend_annotation = create_backend_annotation(components, "x-maven")
     if backend_annotation is not None:
@@ -85,19 +93,62 @@ def fetch_maven_source(request: Request) -> RequestOutput:
     )
 
 
-def _resolve_maven_project(project_dir: Path, deps_dir: Path) -> list[Component]:
+def _resolve_maven_project(
+    project_dir: Path, deps_dir: Path, mode: Mode = Mode.STRICT
+) -> list[Component] | None:
     """Resolve and fetch Maven artifacts for the given project."""
-    lockfile = MavenLockfile.from_file(project_dir / DEFAULT_LOCKFILE)
+    lockfile_path = project_dir / DEFAULT_LOCKFILE
+    if not lockfile_path.exists():
+        if mode == Mode.PERMISSIVE:
+            log.warning(
+                "lockfile.json not found in %s, skipping due to permissive mode", project_dir
+            )
+            return None
+        raise LockfileNotFound(
+            lockfile_path,
+            solution="Generate a lockfile with: "
+            "mvn io.github.chains-project:maven-lockfile:generate",
+        )
+
+    lockfile = MavenLockfile.from_file(lockfile_path)
     deps = parse_maven_dependencies(lockfile)
     plugins = parse_maven_plugins(lockfile)
     boms = parse_maven_boms(deps)
 
-    all_maven_artifacts = deps + plugins + boms
+    all_maven_artifacts = _deduplicate_artifacts(deps + plugins + boms)
+    _validate_artifacts(all_maven_artifacts)
     _download_maven_artifacts(deps_dir, all_maven_artifacts)
 
     components = _generate_sbom_components(all_maven_artifacts)
     main_component = _generate_main_component(lockfile)
     return components + [main_component]
+
+
+def _deduplicate_artifacts(artifacts: list[MavenArtifact]) -> list[MavenArtifact]:
+    """Deduplicate artifacts by URL to avoid redundant downloads."""
+    seen: dict[str, MavenArtifact] = {}
+    for artifact in artifacts:
+        if artifact.url not in seen:
+            seen[artifact.url] = artifact
+    deduplicated = list(seen.values())
+    if len(deduplicated) < len(artifacts):
+        log.info("Deduplicated %d artifacts to %d unique URLs", len(artifacts), len(deduplicated))
+    return deduplicated
+
+
+def _validate_artifacts(artifacts: list[MavenArtifact]) -> None:
+    """Validate all artifact URLs and checksum formats before downloading."""
+    if len(artifacts) > MAX_ARTIFACT_COUNT:
+        raise PackageRejected(
+            f"Lockfile declares {len(artifacts)} artifacts, exceeding the limit of {MAX_ARTIFACT_COUNT}",
+            solution="This may indicate a corrupted or malicious lockfile. "
+            "Verify the lockfile and regenerate if necessary.",
+        )
+
+    for artifact in artifacts:
+        validate_artifact_url(artifact.url)
+        algorithm = get_checksum_algorithm(artifact.checksum_algorithm)
+        validate_checksum_format(algorithm, artifact.checksum)
 
 
 def _generate_sbom_components(
@@ -156,12 +207,36 @@ def _download_maven_artifacts(deps_dir: Path, artifacts: list[MavenArtifact]) ->
     download_paths = {a.url: _create_artifact_dir(deps_dir, a) for a in artifacts}
     asyncio.run(async_download_files(download_paths, config.runtime.concurrency_limit))
 
+    _verify_checksums(artifacts, download_paths)
+    _verify_artifact_sizes(download_paths)
+
     pom_files, pom_checksums = _prepare_pom_and_checksum_downloads(deps_dir, artifacts)
     asyncio.run(async_download_files(pom_files, config.runtime.concurrency_limit))
     asyncio.run(_async_download_optional_files(pom_checksums))
 
     _create_checksums_files(artifacts, download_paths)
     _create_remote_repositories_files(deps_dir, artifacts)
+
+
+def _verify_checksums(artifacts: list[MavenArtifact], download_paths: dict[str, Path]) -> None:
+    """Verify checksums of all downloaded Maven artifacts."""
+    for artifact in artifacts:
+        download_path = download_paths[artifact.url]
+        algorithm = get_checksum_algorithm(artifact.checksum_algorithm)
+        expected = ChecksumInfo(algorithm, artifact.checksum)
+        must_match_any_checksum(download_path, [expected])
+
+
+def _verify_artifact_sizes(download_paths: dict[str, Path]) -> None:
+    """Reject artifacts that exceed the size limit."""
+    for url, path in download_paths.items():
+        size = path.stat().st_size
+        if size > MAX_ARTIFACT_SIZE_BYTES:
+            raise PackageRejected(
+                f"Artifact {path.name} is {size} bytes, exceeding the limit of {MAX_ARTIFACT_SIZE_BYTES}",
+                solution="This may indicate a corrupted download or an unexpectedly large artifact. "
+                "Verify the artifact in your lockfile.",
+            )
 
 
 def _prepare_pom_and_checksum_downloads(
@@ -191,10 +266,15 @@ def _prepare_pom_and_checksum_downloads(
 
 
 async def _download_optional_file(session: aiohttp.ClientSession, url: str, path: Path) -> None:
+    """Download a file that may not exist (404 is acceptable)."""
     suffixes = (".sha1", ".md5", ".sha256", ".sha512", ".sha224", ".sha384")
     async with session.get(url, raise_for_status=False) as response:
         if response.status == 404:
-            log.debug("Skipping %s", url)
+            log.debug("Skipping %s (not found)", url)
+            return
+
+        if response.status >= 400:
+            log.warning("Failed to download optional file %s: HTTP %d", url, response.status)
             return
 
         content = await response.read()
@@ -205,9 +285,14 @@ async def _download_optional_file(session: aiohttp.ClientSession, url: str, path
 
 
 async def _async_download_optional_files(files: dict[str, Path]) -> None:
+    """Download optional files, logging any errors without failing the build."""
     async with aiohttp.ClientSession(trust_env=True) as session:
-        tasks = (_download_optional_file(session, url, path) for url, path in files.items())
-        await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [_download_optional_file(session, url, path) for url, path in files.items()]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                url = list(files.keys())[i]
+                log.warning("Error downloading optional file %s: %s", url, result)
 
 
 def _create_checksums_files(
@@ -231,5 +316,5 @@ def _create_remote_repositories_files(deps_dir: Path, artifacts: list[MavenArtif
             "#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.\n",
             f"#{now}\n",
         ]
-        lines.extend(f"{artifact.filename}>{derive_repository_id(artifact.url)}=\n")
+        lines.append(f"{artifact.filename}>{derive_repository_id(artifact.url)}=\n")
         remote_repos_file.write_text("".join(lines))
