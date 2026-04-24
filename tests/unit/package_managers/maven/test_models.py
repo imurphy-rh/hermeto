@@ -54,6 +54,26 @@ class TestMavenLockfile:
         lockfile = MavenLockfile.from_file(path)
         assert lockfile.path == path
 
+    def test_lockfile_version_1_accepted(self, tmp_path: Path) -> None:
+        lockfile = tmp_path / "lockfile.json"
+        data = {"groupId": "g", "artifactId": "a", "version": "1", "lockFileVersion": 1}
+        lockfile.write_text(json.dumps(data))
+        result = MavenLockfile.from_file(lockfile)
+        assert result.data["lockFileVersion"] == 1
+
+    def test_lockfile_version_absent_accepted(self, tmp_path: Path) -> None:
+        lockfile = tmp_path / "lockfile.json"
+        data = {"groupId": "g", "artifactId": "a", "version": "1"}
+        lockfile.write_text(json.dumps(data))
+        MavenLockfile.from_file(lockfile)
+
+    def test_lockfile_version_2_rejected(self, tmp_path: Path) -> None:
+        lockfile = tmp_path / "lockfile.json"
+        data = {"groupId": "g", "artifactId": "a", "version": "1", "lockFileVersion": 2}
+        lockfile.write_text(json.dumps(data))
+        with pytest.raises(InvalidLockfileFormat, match="lockFileVersion"):
+            MavenLockfile.from_file(lockfile)
+
 
 class TestMavenArtifact:
     def test_basic_construction(self) -> None:

@@ -164,6 +164,10 @@ class NpmSettings(ProxyMixin, extra="forbid"):
     """Npm settings."""
 
 
+class MavenSettings(ProxyMixin, extra="forbid"):
+    """Settings for Maven (x-maven backend)."""
+
+
 class Config(BaseSettings):
     """Singleton that provides default configuration for the application process."""
 
@@ -179,6 +183,7 @@ class Config(BaseSettings):
     pip: PipSettings = PipSettings()
     yarn: YarnSettings = YarnSettings()
     npm: NpmSettings = NpmSettings()
+    maven: MavenSettings = MavenSettings()
     gomod: GomodSettings = GomodSettings()
     http: HttpSettings = HttpSettings()
     runtime: RuntimeSettings = RuntimeSettings()

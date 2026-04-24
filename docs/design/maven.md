@@ -1,0 +1,215 @@
+# Maven Design Document
+
+**Status**: Experimental (`x-maven`)
+
+## Overview
+
+[Apache Maven](https://maven.apache.org/) is a build automation and dependency management tool
+for Java projects. Dependencies are declared in `pom.xml` and resolved from remote repositories
+(primarily [Maven Central](https://repo.maven.apache.org/maven2/)).
+
+The Hermeto Maven backend pre-fetches dependencies listed in a `lockfile.json` produced by the
+[maven-lockfile](https://github.com/chains-project/maven-lockfile) plugin. Hermeto downloads
+artifacts directly via HTTPS — it does not invoke the Maven CLI, ensuring no arbitrary code
+execution during the prefetch phase.
+
+### Developer Workflow
+
+1. **Prerequisites**: Install Maven and the maven-lockfile plugin.
+2. **Generate lockfile**: Run `mvn io.github.chains-project:maven-lockfile:generate` to produce
+   `lockfile.json` in the project root. This records all resolved dependencies with their
+   checksums and download URLs.
+3. **Commit lockfile**: Check `lockfile.json` into the source repository.
+4. **Build in Konflux**: The prefetch-dependencies task invokes
+   `hermeto fetch-deps --source . --output /output '[{"type": "x-maven"}]'`.
+5. **Build phase**: Maven runs with `settings.xml` pointing to the local mirror populated by
+   Hermeto. No network access is needed.
+
+### How the Package Manager Works
+
+- **Registry model**: Maven Central is the default public repository. Projects may also use
+  private repositories (JBoss, Spring, corporate Nexus/Artifactory).
+- **Package identity**: Maven coordinates use the GAV scheme: `groupId:artifactId:version`.
+  Optional qualifiers include `classifier` (e.g., `sources`, `javadoc`) and `type` (e.g.,
+  `war`, `pom`).
+- **Dependency resolution**: Maven resolves the dependency tree at build time using `pom.xml`
+  declarations. The maven-lockfile plugin captures the resolved tree as `lockfile.json`.
+- **Configuration**: `settings.xml` controls repository mirrors, credentials, and local
+  repository location.
+
+## Design
+
+### Scope
+
+**In scope**:
+- Maven projects using the maven-lockfile plugin to generate `lockfile.json`
+- Dependencies, plugins, BOMs, and extensions declared in the lockfile
+- Single-module and multi-module Maven projects
+- SHA-256, SHA-1, SHA-512, SHA-224, SHA-384, and MD5 checksums
+
+**Out of scope**:
+- Gradle projects (Gradle has its own dependency model and lockfile format)
+- Generating `lockfile.json` from `pom.xml` (that is the maven-lockfile plugin's responsibility)
+- SNAPSHOT version resolution (SNAPSHOT artifacts have non-deterministic URLs)
+- Invoking `mvn` or any JVM process during prefetch
+
+### Dependency List Generation
+
+#### Dependency List Toolchain
+
+The [maven-lockfile](https://github.com/chains-project/maven-lockfile) plugin generates
+`lockfile.json`. It is a Maven plugin invoked via:
+
+```bash
+mvn io.github.chains-project:maven-lockfile:generate
+```
+
+The plugin resolves the full dependency tree (including transitive dependencies, plugins, BOMs,
+and extensions) and records each artifact's GAV coordinates, checksum, download URL, and scope.
+
+#### Dependency List Format
+
+**File format**: JSON
+
+**Required fields per artifact**:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `groupId` | Maven group ID | `org.apache.commons` |
+| `artifactId` | Maven artifact ID | `commons-lang3` |
+| `version` | Resolved version | `3.14.0` |
+| `checksumAlgorithm` | Java algorithm name | `SHA-256` |
+| `checksum` | Hex-encoded digest | `abcdef...` |
+| `resolved` | Download URL | `https://repo.maven.apache.org/...` |
+
+**Optional fields**:
+
+| Field | Description |
+|-------|-------------|
+| `classifier` | Artifact classifier (e.g., `sources`, `javadoc`) |
+| `type` | Artifact type (default: `jar`; e.g., `war`, `pom`) |
+| `scope` | Maven scope (`compile`, `runtime`, `test`, etc.) |
+| `repositoryId` | Source repository identifier |
+| `included` | Whether the artifact is included after conflict resolution |
+| `children` | Nested transitive dependencies |
+| `boms` | Nested BOM imports |
+| `lockFileVersion` | Schema version (currently `1`) |
+
+#### Checksum Generation
+
+- **Native support**: The maven-lockfile plugin computes checksums locally or fetches them from
+  the repository.
+- **Algorithms**: SHA-256 is the default. SHA-1, SHA-512, SHA-224, SHA-384, and MD5 are also
+  supported.
+- **Format**: Hex-encoded digest strings. Hermeto validates hex encoding and correct length
+  before use.
+
+### Fetching Content
+
+#### Native vs. Hermeto Fetch
+
+Hermeto downloads artifacts directly using the `resolved` URLs from `lockfile.json`. Maven is
+**not** invoked during prefetch. This is by design — Maven plugins can execute arbitrary code
+during dependency resolution, which violates Hermeto's security model.
+
+#### Project Structure
+
+**Input** (developer's project):
+```
+project/
+├── pom.xml
+└── lockfile.json          # Generated by maven-lockfile plugin
+```
+
+**Output** (Hermeto prefetch):
+```
+output/
+├── .build-config.json     # Environment variables and project files
+├── bom.json               # CycloneDX SBOM
+├── settings.xml           # Maven settings pointing to local mirror
+└── deps/
+    └── maven/             # Local Maven repository layout
+        └── org/
+            └── example/
+                └── foo/
+                    └── 1.0.0/
+                        ├── foo-1.0.0.jar
+                        ├── foo-1.0.0.jar.sha256
+                        ├── foo-1.0.0.pom
+                        └── _remote.repositories
+```
+
+#### File Formats and Metadata
+
+- **Repository layout**: Standard Maven local repository layout
+  (`groupId-as-path/artifactId/version/filename`).
+- **Checksum sidecars**: `<artifact>.<algorithm>` files containing the hex digest.
+- **`_remote.repositories`**: Maven Resolver metadata recording which repository each artifact
+  was fetched from.
+- **POM files**: Downloaded alongside each JAR artifact for Maven to read during the build phase.
+  POM checksums are fetched from the server (optional — 404 is acceptable).
+
+#### Network Requirements
+
+- **Registry endpoints**: Any HTTPS URL. Maven Central
+  (`https://repo.maven.apache.org/maven2/`) is the most common.
+- **Authentication**: Via `.netrc` or environment variables, consistent with other Hermeto
+  backends.
+- **Proxy support**: Configurable via `HERMETO_MAVEN__PROXY_URL`. When set, artifact downloads
+  are routed through the proxy. The proxy URL is recorded in the SBOM as an `ExternalReference`.
+
+### Build Environment Config
+
+#### Environment Variables
+
+| Variable | Purpose | Value |
+|----------|---------|-------|
+| `MAVEN_OPTS` | Points Maven to the local repository | `-Dmaven.repo.local=${output_dir}/deps/maven` |
+| `MAVEN_ARGS` | Points Maven to the generated settings.xml | `-s ${output_dir}/settings.xml` |
+
+#### Configuration Files
+
+**`settings.xml`**: Configures Maven to use the prefetched local repository as a mirror for all
+remote repositories:
+
+```xml
+<settings>
+  <localRepository>${output_dir}/deps/maven</localRepository>
+  <mirrors>
+    <mirror>
+      <id>hermeto-local</id>
+      <mirrorOf>*</mirrorOf>
+      <url>file://${output_dir}/deps/maven</url>
+    </mirror>
+  </mirrors>
+</settings>
+```
+
+## Implementation Notes
+
+### Current Limitations
+
+- **Classifier support**: Not yet implemented. Artifacts with classifiers (`-sources.jar`,
+  `-javadoc.jar`, `-tests.jar`) are downloaded (the URL is correct) but POM URL derivation and
+  PURL generation do not account for classifiers.
+- **Artifact type support**: Not yet implemented. Non-JAR artifact types (`war`, `pom`, `ear`)
+  are handled by URL suffix checking rather than the lockfile's `type` field.
+- **`included` field filtering**: Not yet implemented. Conflict-excluded dependencies
+  (`included: false`) are downloaded even though Maven would not use them.
+- **Maven extensions**: Not yet parsed from `mavenExtensions` in the lockfile.
+- **SNAPSHOT versions**: Not supported. SNAPSHOT artifacts have non-deterministic download URLs
+  that change with each build.
+- **POM integrity**: POM file checksums are server-attested only (fetched from the same server).
+  There are no lockfile-declared checksums for POM files. This is a residual risk: if the server
+  is compromised, both the POM and its checksum can be tampered.
+- **Recursion depth**: The dependency tree parser uses recursion with no depth limit. A deeply
+  nested or circular lockfile could cause a stack overflow.
+
+## References
+
+- [Apache Maven documentation](https://maven.apache.org/guides/)
+- [maven-lockfile plugin](https://github.com/chains-project/maven-lockfile)
+- [Maven Central Repository](https://repo.maven.apache.org/maven2/)
+- [CycloneDX SBOM specification](https://cyclonedx.org/docs/1.6/)
+- [Package URL (PURL) specification](https://github.com/package-url/purl-spec) — Maven type:
+  `pkg:maven/groupId/artifactId@version`

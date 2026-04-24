@@ -27,6 +27,7 @@ from hermeto.core.package_managers.maven.main import (
     _generate_main_component,
     _generate_sbom_components,
     _prepare_pom_and_checksum_downloads,
+    _rewrite_url_for_proxy,
     _validate_artifacts,
     _verify_artifact_sizes,
     _verify_checksums,
@@ -486,6 +487,47 @@ class TestDownloadMavenArtifacts:
             _download_maven_artifacts(tmp_path, [artifact])
 
         assert mock_download.call_count >= 1
+
+
+class TestRewriteUrlForProxy:
+    def test_basic_rewrite(self) -> None:
+        result = _rewrite_url_for_proxy(
+            "https://repo.maven.apache.org/maven2/org/example/foo/1.0/foo-1.0.jar",
+            "https://proxy.corp.example.com/maven",
+        )
+        assert (
+            result == "https://proxy.corp.example.com/maven/maven2/org/example/foo/1.0/foo-1.0.jar"
+        )
+
+    def test_proxy_with_trailing_slash(self) -> None:
+        result = _rewrite_url_for_proxy(
+            "https://repo.maven.apache.org/maven2/foo.jar",
+            "https://proxy.example.com/",
+        )
+        assert result == "https://proxy.example.com/maven2/foo.jar"
+
+    def test_proxy_without_trailing_slash(self) -> None:
+        result = _rewrite_url_for_proxy(
+            "https://repo.maven.apache.org/maven2/foo.jar",
+            "https://proxy.example.com",
+        )
+        assert result == "https://proxy.example.com/maven2/foo.jar"
+
+
+class TestSbomComponentsWithProxy:
+    def test_no_proxy_no_external_refs(self) -> None:
+        components = _generate_sbom_components([make_artifact()])
+        assert components[0].external_references is None
+
+    def test_proxy_adds_external_ref(self) -> None:
+        components = _generate_sbom_components(
+            [make_artifact()], proxy_url="https://proxy.example.com"
+        )
+        refs = components[0].external_references
+        assert refs is not None
+        assert len(refs) == 1
+        assert refs[0].url == "https://proxy.example.com"
+        assert refs[0].type == "distribution"
 
 
 class TestSettingsXmlTemplate:

@@ -14,7 +14,7 @@ from hermeto.core.errors import LockfileNotFound, PackageRejected
 from hermeto.core.models.input import Mode, Request
 from hermeto.core.models.output import Component, EnvironmentVariable, ProjectFile, RequestOutput
 from hermeto.core.models.property_semantics import Property, PropertyEnum
-from hermeto.core.models.sbom import Annotation, create_backend_annotation
+from hermeto.core.models.sbom import Annotation, ExternalReference, create_backend_annotation
 from hermeto.core.package_managers.general import async_download_files
 from hermeto.core.package_managers.maven.models import (
     MavenArtifact,
@@ -74,11 +74,14 @@ def fetch_maven_source(request: Request) -> RequestOutput:
 
     all_artifacts = _deduplicate_artifacts(all_artifacts)
 
+    config = get_config()
+    proxy_url = str(config.maven.proxy_url) if config.maven.proxy_url else None
+
     if all_artifacts:
         _validate_artifacts(all_artifacts)
-        _download_maven_artifacts(deps_dir.path, all_artifacts)
+        _download_maven_artifacts(deps_dir.path, all_artifacts, proxy_url)
 
-    components.extend(_generate_sbom_components(all_artifacts))
+    components.extend(_generate_sbom_components(all_artifacts, proxy_url))
     for lockfile in lockfiles:
         components.append(_generate_main_component(lockfile))
 
@@ -163,6 +166,7 @@ def _validate_artifacts(artifacts: list[MavenArtifact]) -> None:
 
 def _generate_sbom_components(
     artifacts: list[MavenArtifact],
+    proxy_url: str | None = None,
 ) -> list[Component]:
     """Generate SBOM components from Maven dependencies and plugins."""
     result: list[Component] = []
@@ -176,11 +180,17 @@ def _generate_sbom_components(
 
         name = f"{artifact.group_id}.{artifact.artifact_id}"
         scope = artifact.get("scope", "compile")  # fallback to 'compile' scope
+
+        external_refs: list[ExternalReference] | None = None
+        if proxy_url is not None:
+            external_refs = [ExternalReference(url=proxy_url, comment="proxy URL")]
+
         component = Component(
             name=name,
             purl=purl.to_string(),
             version=artifact.version,
             properties=[Property(name=PropertyEnum.PROP_MAVEN_SCOPE, value=scope)],
+            external_references=external_refs,
         )
         result.append(component)
 
@@ -210,21 +220,36 @@ def _create_artifact_dir(deps_dir: Path, artifact: MavenArtifact) -> Path:
     return artifact_dir_abs_path / artifact.filename
 
 
-def _download_maven_artifacts(deps_dir: Path, artifacts: list[MavenArtifact]) -> None:
+def _rewrite_url_for_proxy(url: str, proxy_url: str) -> str:
+    """Rewrite an artifact URL to route through a proxy."""
+    proxy_url = proxy_url.rstrip("/") + "/"
+    url_path = urlparse(url).path.lstrip("/")
+    return proxy_url + url_path
+
+
+def _download_maven_artifacts(
+    deps_dir: Path, artifacts: list[MavenArtifact], proxy_url: str | None = None
+) -> None:
     """Download Maven dependencies."""
     config = get_config()
 
-    download_paths = {a.url: _create_artifact_dir(deps_dir, a) for a in artifacts}
-    asyncio.run(async_download_files(download_paths, config.runtime.concurrency_limit))
+    original_to_path: dict[str, Path] = {
+        a.url: _create_artifact_dir(deps_dir, a) for a in artifacts
+    }
+    fetch_urls_to_path: dict[str, Path] = {}
+    for a in artifacts:
+        fetch_url = _rewrite_url_for_proxy(a.url, proxy_url) if proxy_url else a.url
+        fetch_urls_to_path[fetch_url] = original_to_path[a.url]
+    asyncio.run(async_download_files(fetch_urls_to_path, config.runtime.concurrency_limit))
 
-    _verify_checksums(artifacts, download_paths)
-    _verify_artifact_sizes(download_paths)
+    _verify_checksums(artifacts, original_to_path)
+    _verify_artifact_sizes(original_to_path)
 
     pom_files, pom_checksums = _prepare_pom_and_checksum_downloads(deps_dir, artifacts)
     asyncio.run(async_download_files(pom_files, config.runtime.concurrency_limit))
     asyncio.run(_async_download_optional_files(pom_checksums))
 
-    _create_checksums_files(artifacts, download_paths)
+    _create_checksums_files(artifacts, original_to_path)
     _create_remote_repositories_files(deps_dir, artifacts)
 
 
