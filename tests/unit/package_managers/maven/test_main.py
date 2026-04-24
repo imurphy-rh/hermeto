@@ -121,6 +121,59 @@ class TestFetchMavenSource:
         assert len(result.components) == 1
         assert "org.example" in result.components[0].name
 
+    @patch("hermeto.core.package_managers.maven.main._download_maven_artifacts")
+    def test_multimodule_deduplicates_across_modules(
+        self, mock_download: MagicMock, tmp_path: Path
+    ) -> None:
+        source_dir = tmp_path / "source"
+        output_dir = tmp_path / "output"
+        source_dir.mkdir()
+        output_dir.mkdir()
+
+        shared_dep = make_artifact_data()
+        module_a = source_dir / "module-a"
+        module_a.mkdir()
+        write_lockfile(
+            module_a,
+            {
+                "groupId": "org.example",
+                "artifactId": "module-a",
+                "version": "1.0.0",
+                "dependencies": [shared_dep],
+            },
+        )
+
+        module_b = source_dir / "module-b"
+        module_b.mkdir()
+        write_lockfile(
+            module_b,
+            {
+                "groupId": "org.example",
+                "artifactId": "module-b",
+                "version": "1.0.0",
+                "dependencies": [shared_dep],
+            },
+        )
+
+        request = Request(
+            source_dir=source_dir,
+            output_dir=output_dir,
+            packages=[
+                {"type": "x-maven", "path": "module-a"},
+                {"type": "x-maven", "path": "module-b"},
+            ],
+        )
+
+        result = fetch_maven_source(request)
+
+        dep_components = [c for c in result.components if c.name == "org.example.foo"]
+        assert len(dep_components) == 1
+
+        main_components = [c for c in result.components if "module-" in c.name]
+        assert len(main_components) == 2
+
+        mock_download.assert_called_once()
+
 
 class TestDeduplicateArtifacts:
     def test_no_duplicates(self) -> None:

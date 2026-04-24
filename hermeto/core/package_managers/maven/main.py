@@ -61,11 +61,26 @@ def fetch_maven_source(request: Request) -> RequestOutput:
     deps_dir = request.output_dir.join_within_root("deps", "maven")
     deps_dir.path.mkdir(parents=True, exist_ok=True)
 
+    all_artifacts: list[MavenArtifact] = []
+    lockfiles: list[MavenLockfile] = []
+
     for package in request.maven_packages:
         project_dir = request.source_dir.join_within_root(package.path)
-        result = _resolve_maven_project(project_dir.path, deps_dir.path, request.mode)
+        result = _resolve_maven_project(project_dir.path, request.mode)
         if result is not None:
-            components.extend(result)
+            artifacts, lockfile = result
+            all_artifacts.extend(artifacts)
+            lockfiles.append(lockfile)
+
+    all_artifacts = _deduplicate_artifacts(all_artifacts)
+
+    if all_artifacts:
+        _validate_artifacts(all_artifacts)
+        _download_maven_artifacts(deps_dir.path, all_artifacts)
+
+    components.extend(_generate_sbom_components(all_artifacts))
+    for lockfile in lockfiles:
+        components.append(_generate_main_component(lockfile))
 
     backend_annotation = create_backend_annotation(components, "x-maven")
     if backend_annotation is not None:
@@ -93,9 +108,12 @@ def fetch_maven_source(request: Request) -> RequestOutput:
 
 
 def _resolve_maven_project(
-    project_dir: Path, deps_dir: Path, mode: Mode = Mode.STRICT
-) -> list[Component] | None:
-    """Resolve and fetch Maven artifacts for the given project."""
+    project_dir: Path, mode: Mode = Mode.STRICT
+) -> tuple[list[MavenArtifact], MavenLockfile] | None:
+    """Parse a Maven lockfile and return its artifacts and lockfile metadata.
+
+    Returns None in permissive mode when the lockfile is missing.
+    """
     lockfile_path = project_dir / DEFAULT_LOCKFILE
     try:
         lockfile = MavenLockfile.from_file(lockfile_path)
@@ -114,13 +132,7 @@ def _resolve_maven_project(
     plugins = parse_maven_plugins(lockfile)
     boms = parse_maven_boms(deps)
 
-    all_maven_artifacts = _deduplicate_artifacts(deps + plugins + boms)
-    _validate_artifacts(all_maven_artifacts)
-    _download_maven_artifacts(deps_dir, all_maven_artifacts)
-
-    components = _generate_sbom_components(all_maven_artifacts)
-    main_component = _generate_main_component(lockfile)
-    return components + [main_component]
+    return deps + plugins + boms, lockfile
 
 
 def _deduplicate_artifacts(artifacts: list[MavenArtifact]) -> list[MavenArtifact]:
