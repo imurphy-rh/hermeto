@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,11 @@ import pytest
 from . import utils
 
 log = logging.getLogger(__name__)
+
+_LOCAL_TEST_REPO = os.getenv(
+    "HERMETO_MAVEN_TEST_REPO",
+    "file:///Users/imurphy/projects/konflux-maven/test-repo",
+)
 
 
 @pytest.mark.parametrize(
@@ -16,6 +22,7 @@ log = logging.getLogger(__name__)
             utils.TestParameters(
                 branch="x-maven/e2e",
                 packages=({"path": ".", "type": "x-maven"},),
+                repo_url=_LOCAL_TEST_REPO,
                 check_output=False,
                 check_deps_checksums=False,
                 expected_exit_code=0,
@@ -27,6 +34,7 @@ log = logging.getLogger(__name__)
             utils.TestParameters(
                 branch="x-maven/missing-lockfile",
                 packages=({"path": ".", "type": "x-maven"},),
+                repo_url=_LOCAL_TEST_REPO,
                 check_output=False,
                 check_deps_checksums=False,
                 expected_exit_code=2,
@@ -38,6 +46,7 @@ log = logging.getLogger(__name__)
             utils.TestParameters(
                 branch="x-maven/missing-lockfile",
                 packages=({"path": ".", "type": "x-maven"},),
+                repo_url=_LOCAL_TEST_REPO,
                 global_flags=["--mode", "permissive"],
                 check_output=False,
                 check_deps_checksums=False,
