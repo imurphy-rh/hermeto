@@ -2,7 +2,7 @@
 import re
 from urllib.parse import urlparse
 
-from hermeto.core.errors import PackageRejected
+from hermeto.core.errors import InvalidChecksum, PackageRejected
 
 JAVA_TO_PYTHON_CHECKSUM_ALGORITHMS = {
     "SHA-256": "sha256",
@@ -40,16 +40,17 @@ def get_checksum_algorithm(java_algorithm: str) -> str:
 def validate_checksum_format(algorithm: str, checksum: str) -> None:
     """Validate that a checksum is hex-encoded with the correct length."""
     if not _HEX_RE.match(checksum):
-        raise PackageRejected(
-            f"Checksum is not valid hexadecimal: {checksum!r}",
+        raise InvalidChecksum(
+            checksum,
             solution="The lockfile checksum must be a hex-encoded digest. "
             "Regenerate your lockfile with: mvn io.github.chains-project:maven-lockfile:generate",
         )
 
     expected_len = _EXPECTED_HEX_LENGTHS.get(algorithm)
     if expected_len and len(checksum) != expected_len:
-        raise PackageRejected(
-            f"Checksum length {len(checksum)} does not match expected {expected_len} for {algorithm}",
+        raise InvalidChecksum(
+            checksum,
+            reason=f"Checksum length {len(checksum)} does not match expected {expected_len} for {algorithm}",
             solution="The lockfile checksum appears corrupted. "
             "Regenerate your lockfile with: mvn io.github.chains-project:maven-lockfile:generate",
         )

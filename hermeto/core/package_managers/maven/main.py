@@ -26,7 +26,6 @@ from hermeto.core.package_managers.maven.models import (
 from hermeto.core.package_managers.maven.utils import (
     derive_pom_filename,
     derive_repository_id,
-    get_checksum_algorithm,
     validate_artifact_url,
     validate_checksum_format,
 )
@@ -98,7 +97,9 @@ def _resolve_maven_project(
 ) -> list[Component] | None:
     """Resolve and fetch Maven artifacts for the given project."""
     lockfile_path = project_dir / DEFAULT_LOCKFILE
-    if not lockfile_path.exists():
+    try:
+        lockfile = MavenLockfile.from_file(lockfile_path)
+    except FileNotFoundError:
         if mode == Mode.PERMISSIVE:
             log.warning(
                 "lockfile.json not found in %s, skipping due to permissive mode", project_dir
@@ -109,8 +110,6 @@ def _resolve_maven_project(
             solution="Generate a lockfile with: "
             "mvn io.github.chains-project:maven-lockfile:generate",
         )
-
-    lockfile = MavenLockfile.from_file(lockfile_path)
     deps = parse_maven_dependencies(lockfile)
     plugins = parse_maven_plugins(lockfile)
     boms = parse_maven_boms(deps)
@@ -147,8 +146,7 @@ def _validate_artifacts(artifacts: list[MavenArtifact]) -> None:
 
     for artifact in artifacts:
         validate_artifact_url(artifact.url)
-        algorithm = get_checksum_algorithm(artifact.checksum_algorithm)
-        validate_checksum_format(algorithm, artifact.checksum)
+        validate_checksum_format(artifact.algorithm, artifact.checksum)
 
 
 def _generate_sbom_components(
@@ -222,14 +220,13 @@ def _verify_checksums(artifacts: list[MavenArtifact], download_paths: dict[str, 
     """Verify checksums of all downloaded Maven artifacts."""
     for artifact in artifacts:
         download_path = download_paths[artifact.url]
-        algorithm = get_checksum_algorithm(artifact.checksum_algorithm)
-        expected = ChecksumInfo(algorithm, artifact.checksum)
+        expected = ChecksumInfo(artifact.algorithm, artifact.checksum)
         must_match_any_checksum(download_path, [expected])
 
 
 def _verify_artifact_sizes(download_paths: dict[str, Path]) -> None:
     """Reject artifacts that exceed the size limit."""
-    for url, path in download_paths.items():
+    for path in download_paths.values():
         size = path.stat().st_size
         if size > MAX_ARTIFACT_SIZE_BYTES:
             raise PackageRejected(
@@ -257,9 +254,8 @@ def _prepare_pom_and_checksum_downloads(
             artifact_dir = deps_dir / artifact.artifact_relative_dir
             pom_files[pom_file_url] = artifact_dir / pom_filename
 
-            algorithm = get_checksum_algorithm(artifact.checksum_algorithm)
-            pom_checksum_url = f"{pom_file_url}.{algorithm}"
-            pom_checksum_path = artifact_dir / f"{pom_filename}.{algorithm}"
+            pom_checksum_url = f"{pom_file_url}.{artifact.algorithm}"
+            pom_checksum_path = artifact_dir / f"{pom_filename}.{artifact.algorithm}"
             pom_checksums[pom_checksum_url] = pom_checksum_path
 
     return pom_files, pom_checksums
@@ -287,11 +283,11 @@ async def _download_optional_file(session: aiohttp.ClientSession, url: str, path
 async def _async_download_optional_files(files: dict[str, Path]) -> None:
     """Download optional files, logging any errors without failing the build."""
     async with aiohttp.ClientSession(trust_env=True) as session:
-        tasks = [_download_optional_file(session, url, path) for url, path in files.items()]
+        urls = list(files.keys())
+        tasks = [_download_optional_file(session, url, files[url]) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, result in enumerate(results):
+        for url, result in zip(urls, results):
             if isinstance(result, Exception):
-                url = list(files.keys())[i]
                 log.warning("Error downloading optional file %s: %s", url, result)
 
 
@@ -300,9 +296,8 @@ def _create_checksums_files(
 ) -> None:
     """Create checksum files for the Maven artifacts."""
     for artifact in artifacts:
-        algorithm = get_checksum_algorithm(artifact.checksum_algorithm)
         download_path = download_paths[artifact.url]
-        checksum_file = download_path.with_suffix(f"{download_path.suffix}.{algorithm}")
+        checksum_file = download_path.with_suffix(f"{download_path.suffix}.{artifact.algorithm}")
         checksum_file.write_text(artifact.checksum)
 
 

@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from hermeto.core.errors import InvalidLockfileFormat, LockfileNotFound, UnexpectedFormat
+from hermeto.core.errors import InvalidLockfileFormat, UnexpectedFormat
+from hermeto.core.package_managers.maven.utils import get_checksum_algorithm
 
 log = logging.getLogger(__name__)
 
@@ -32,16 +33,11 @@ class MavenLockfile:
     @classmethod
     def from_file(cls, path: Path) -> "MavenLockfile":
         """Create a MavenLockfile object from the provided path."""
-        if not path.exists():
-            raise LockfileNotFound(
-                path,
-                solution="Generate a lockfile with: "
-                "mvn io.github.chains-project:maven-lockfile:generate",
-            )
-
         try:
             with path.open() as f:
                 data = json.load(f)
+        except FileNotFoundError:
+            raise
         except json.JSONDecodeError as e:
             raise InvalidLockfileFormat(
                 path,
@@ -89,6 +85,7 @@ class MavenArtifact(UserDict):
         self.version = data["version"]
         self.checksum_algorithm = data["checksumAlgorithm"]
         self.checksum = data["checksum"]
+        self.algorithm = get_checksum_algorithm(data["checksumAlgorithm"])
         super().__init__(data)
 
     @property
