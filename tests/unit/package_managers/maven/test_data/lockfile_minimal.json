@@ -1,0 +1,18 @@
+{
+  "groupId": "org.example",
+  "artifactId": "my-app",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "groupId": "commons-io",
+      "artifactId": "commons-io",
+      "version": "2.16.1",
+      "checksumAlgorithm": "SHA-256",
+      "checksum": "b47720dc14b14a6aefb68e1f3b07bf83e6d3ce5be968a4a6e3e40e48b5103e72",
+      "resolved": "https://repo.maven.apache.org/maven2/commons-io/commons-io/2.16.1/commons-io-2.16.1.jar",
+      "repositoryId": "central",
+      "scope": "compile",
+      "children": []
+    }
+  ]
+}

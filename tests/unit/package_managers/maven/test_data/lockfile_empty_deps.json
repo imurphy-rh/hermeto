@@ -1,0 +1,6 @@
+{
+  "groupId": "org.example",
+  "artifactId": "empty-app",
+  "version": "0.1.0",
+  "dependencies": []
+}

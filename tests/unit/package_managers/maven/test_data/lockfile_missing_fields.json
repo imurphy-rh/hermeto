@@ -1,0 +1,12 @@
+{
+  "groupId": "org.example",
+  "artifactId": "my-app",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "groupId": "commons-io",
+      "artifactId": "commons-io",
+      "version": "2.16.1"
+    }
+  ]
+}
