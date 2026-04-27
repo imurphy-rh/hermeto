@@ -1,0 +1,34 @@
+{
+  "groupId": "org.example",
+  "artifactId": "my-app",
+  "version": "1.0.0",
+  "lockFileVersion": 1,
+  "dependencies": [
+    {
+      "groupId": "org.example",
+      "artifactId": "my-war",
+      "version": "2.0.0",
+      "type": "war",
+      "checksumAlgorithm": "SHA-256",
+      "checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "scope": "compile",
+      "resolved": "https://repo.maven.apache.org/maven2/org/example/my-war/2.0.0/my-war-2.0.0.war",
+      "repositoryId": "central",
+      "children": [],
+      "boms": []
+    },
+    {
+      "groupId": "org.example",
+      "artifactId": "parent-pom",
+      "version": "1.0.0",
+      "type": "pom",
+      "checksumAlgorithm": "SHA-256",
+      "checksum": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "scope": "import",
+      "resolved": "https://repo.maven.apache.org/maven2/org/example/parent-pom/1.0.0/parent-pom-1.0.0.pom",
+      "repositoryId": "central",
+      "children": [],
+      "boms": []
+    }
+  ]
+}

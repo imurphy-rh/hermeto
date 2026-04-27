@@ -6,10 +6,12 @@ import pytest
 
 from hermeto.core.errors import InvalidLockfileFormat, PackageRejected, UnexpectedFormat
 from hermeto.core.package_managers.maven.models import (
+    _MAX_TREE_DEPTH,
     MavenArtifact,
     MavenLockfile,
     parse_maven_boms,
     parse_maven_dependencies,
+    parse_maven_extensions,
     parse_maven_plugins,
 )
 from tests.unit.package_managers.maven.conftest import TEST_DATA_DIR, make_artifact_data
@@ -141,6 +143,26 @@ class TestMavenArtifact:
         artifact = MavenArtifact(data)
         assert artifact.artifact_relative_dir == Path("org/apache/maven/plugins/foo/1.0.0")
 
+    def test_classifier_present(self) -> None:
+        data = make_artifact_data(classifier="sources")
+        artifact = MavenArtifact(data)
+        assert artifact.classifier == "sources"
+
+    def test_classifier_absent(self) -> None:
+        data = make_artifact_data()
+        artifact = MavenArtifact(data)
+        assert artifact.classifier is None
+
+    def test_artifact_type_present(self) -> None:
+        data = make_artifact_data(type="war")
+        artifact = MavenArtifact(data)
+        assert artifact.artifact_type == "war"
+
+    def test_artifact_type_absent(self) -> None:
+        data = make_artifact_data()
+        artifact = MavenArtifact(data)
+        assert artifact.artifact_type is None
+
     def test_userdict_access(self) -> None:
         data = make_artifact_data(scope="test")
         artifact = MavenArtifact(data)
@@ -169,6 +191,38 @@ class TestParseMavenDependencies:
         lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_empty_deps.json")
         deps = parse_maven_dependencies(lockfile)
         assert deps == []
+
+    def test_included_false_filtered_out(self) -> None:
+        lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_with_classifiers.json")
+        deps = parse_maven_dependencies(lockfile)
+        artifact_ids = [d.artifact_id for d in deps]
+        assert "apiguardian-api" not in artifact_ids
+        assert "junit-jupiter-api" in artifact_ids
+        assert "opentest4j" in artifact_ids
+
+    def test_included_absent_defaults_to_true(self) -> None:
+        lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_minimal.json")
+        deps = parse_maven_dependencies(lockfile)
+        assert len(deps) == 1
+
+    def test_included_string_false_is_truthy(self) -> None:
+        """The lockfile plugin uses JSON booleans, but guard against string 'false'."""
+        from hermeto.core.package_managers.maven.models import _parse_dependency_tree
+
+        data = make_artifact_data()
+        data["included"] = "false"
+        deps: list[MavenArtifact] = []
+        _parse_dependency_tree(deps, [data])
+        assert len(deps) == 1
+
+    def test_included_zero_is_falsy(self) -> None:
+        from hermeto.core.package_managers.maven.models import _parse_dependency_tree
+
+        data = make_artifact_data()
+        data["included"] = 0
+        deps: list[MavenArtifact] = []
+        _parse_dependency_tree(deps, [data])
+        assert len(deps) == 0
 
     def test_missing_deps_key(self) -> None:
         lockfile = MavenLockfile(Path("/fake"), {"groupId": "g", "artifactId": "a", "version": "1"})
@@ -209,3 +263,79 @@ class TestParseMavenBoms:
         lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_missing_fields.json")
         with pytest.raises(UnexpectedFormat, match="missing required fields"):
             parse_maven_dependencies(lockfile)
+
+
+class TestParseMavenExtensions:
+    def test_with_extensions(self) -> None:
+        lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_with_extensions.json")
+        extensions = parse_maven_extensions(lockfile)
+        assert len(extensions) == 1
+        assert extensions[0].artifact_id == "takari-smart-builder"
+
+    def test_no_extensions(self) -> None:
+        lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_minimal.json")
+        extensions = parse_maven_extensions(lockfile)
+        assert extensions == []
+
+
+class TestReactorDependencySkipping:
+    def test_reactor_dep_skipped_children_kept(self) -> None:
+        lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_with_reactor_deps.json")
+        deps = parse_maven_dependencies(lockfile)
+        artifact_ids = [d.artifact_id for d in deps]
+        assert "keycloak-common" not in artifact_ids
+        assert "jackson-core" in artifact_ids
+        assert "jakarta.activation-api" in artifact_ids
+
+    def test_reactor_plugin_skipped_plugin_deps_kept(self) -> None:
+        lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_with_reactor_deps.json")
+        plugins = parse_maven_plugins(lockfile)
+        artifact_ids = [p.artifact_id for p in plugins]
+        assert "keycloak-maven-plugin" not in artifact_ids
+        assert "maven-plugin-api" in artifact_ids
+
+    def test_reactor_extension_skipped(self) -> None:
+        lockfile = MavenLockfile.from_file(TEST_DATA_DIR / "lockfile_with_reactor_deps.json")
+        extensions = parse_maven_extensions(lockfile)
+        assert len(extensions) == 0
+
+
+class TestTreeDepthLimit:
+    def _build_deep_tree(self, depth: int) -> list[dict]:
+        base = make_artifact_data(artifactId=f"dep-{depth}")
+        node = {**base, "children": []}
+        for i in range(depth - 1, -1, -1):
+            parent = {**make_artifact_data(artifactId=f"dep-{i}"), "children": [node]}
+            node = parent
+        return [node]
+
+    def test_dependency_tree_at_max_depth(self) -> None:
+        from hermeto.core.package_managers.maven.models import _parse_dependency_tree
+
+        children = self._build_deep_tree(_MAX_TREE_DEPTH)
+        deps: list[MavenArtifact] = []
+        _parse_dependency_tree(deps, children)
+        assert len(deps) == _MAX_TREE_DEPTH + 1
+
+    def test_dependency_tree_exceeds_max_depth(self) -> None:
+        from hermeto.core.package_managers.maven.models import _parse_dependency_tree
+
+        children = self._build_deep_tree(_MAX_TREE_DEPTH + 1)
+        deps: list[MavenArtifact] = []
+        with pytest.raises(InvalidLockfileFormat, match="maximum depth"):
+            _parse_dependency_tree(deps, children)
+
+    def test_bom_tree_exceeds_max_depth(self) -> None:
+        from hermeto.core.package_managers.maven.models import _parse_bom_tree
+
+        base = make_artifact_data(artifactId=f"bom-{_MAX_TREE_DEPTH + 1}")
+        base["resolved"] = base["resolved"].replace(".jar", ".pom")
+        node = {**base, "boms": []}
+        for i in range(_MAX_TREE_DEPTH, -1, -1):
+            b = make_artifact_data(artifactId=f"bom-{i}")
+            b["resolved"] = b["resolved"].replace(".jar", ".pom")
+            parent = {**b, "boms": [node]}
+            node = parent
+        boms: list[MavenArtifact] = []
+        with pytest.raises(InvalidLockfileFormat, match="maximum depth"):
+            _parse_bom_tree(boms, [node])

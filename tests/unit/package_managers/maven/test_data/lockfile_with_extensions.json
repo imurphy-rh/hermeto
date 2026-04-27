@@ -1,0 +1,19 @@
+{
+  "groupId": "org.example",
+  "artifactId": "my-app",
+  "version": "1.0.0",
+  "lockFileVersion": 1,
+  "dependencies": [],
+  "mavenExtensions": [
+    {
+      "groupId": "io.takari.maven",
+      "artifactId": "takari-smart-builder",
+      "version": "0.6.1",
+      "checksumAlgorithm": "SHA-256",
+      "checksum": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "resolved": "https://repo.maven.apache.org/maven2/io/takari/maven/takari-smart-builder/0.6.1/takari-smart-builder-0.6.1.jar",
+      "repositoryId": "central",
+      "scope": "compile"
+    }
+  ]
+}

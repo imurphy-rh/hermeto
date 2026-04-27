@@ -189,21 +189,11 @@ remote repositories:
 
 ### Current Limitations
 
-- **Classifier support**: Not yet implemented. Artifacts with classifiers (`-sources.jar`,
-  `-javadoc.jar`, `-tests.jar`) are downloaded (the URL is correct) but POM URL derivation and
-  PURL generation do not account for classifiers.
-- **Artifact type support**: Not yet implemented. Non-JAR artifact types (`war`, `pom`, `ear`)
-  are handled by URL suffix checking rather than the lockfile's `type` field.
-- **`included` field filtering**: Not yet implemented. Conflict-excluded dependencies
-  (`included: false`) are downloaded even though Maven would not use them.
-- **Maven extensions**: Not yet parsed from `mavenExtensions` in the lockfile.
 - **SNAPSHOT versions**: Not supported. SNAPSHOT artifacts have non-deterministic download URLs
   that change with each build.
 - **POM integrity**: POM file checksums are server-attested only (fetched from the same server).
   There are no lockfile-declared checksums for POM files. This is a residual risk: if the server
   is compromised, both the POM and its checksum can be tampered.
-- **Recursion depth**: The dependency tree parser uses recursion with no depth limit. A deeply
-  nested or circular lockfile could cause a stack overflow.
 
 ## References
 

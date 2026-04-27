@@ -27,6 +27,7 @@ from hermeto.core.package_managers.maven.models import (
     MavenLockfile,
     parse_maven_boms,
     parse_maven_dependencies,
+    parse_maven_extensions,
     parse_maven_plugins,
 )
 from hermeto.core.package_managers.maven.utils import (
@@ -82,10 +83,13 @@ def fetch_maven_source(request: Request) -> RequestOutput:
 
     config = get_config()
     proxy_url = str(config.maven.proxy_url) if config.maven.proxy_url else None
+    proxy_auth: aiohttp.BasicAuth | None = None
+    if config.maven.proxy_login and config.maven.proxy_password:
+        proxy_auth = aiohttp.BasicAuth(config.maven.proxy_login, config.maven.proxy_password)
 
     if all_artifacts:
         _validate_artifacts(all_artifacts)
-        _download_maven_artifacts(deps_dir.path, all_artifacts, proxy_url)
+        _download_maven_artifacts(deps_dir.path, all_artifacts, proxy_url, proxy_auth)
 
     components.extend(_generate_sbom_components(all_artifacts, proxy_url))
     for lockfile in lockfiles:
@@ -139,9 +143,10 @@ def _resolve_maven_project(
         )
     deps = parse_maven_dependencies(lockfile)
     plugins = parse_maven_plugins(lockfile)
+    extensions = parse_maven_extensions(lockfile)
     boms = parse_maven_boms(deps)
 
-    return deps + plugins + boms, lockfile
+    return deps + plugins + extensions + boms, lockfile
 
 
 def _deduplicate_artifacts(artifacts: list[MavenArtifact]) -> list[MavenArtifact]:
@@ -177,11 +182,17 @@ def _generate_sbom_components(
     """Generate SBOM components from Maven dependencies and plugins."""
     result: list[Component] = []
     for artifact in artifacts:
+        qualifiers: dict[str, str] = {}
+        if artifact.classifier:
+            qualifiers["classifier"] = artifact.classifier
+        if artifact.artifact_type and artifact.artifact_type != "jar":
+            qualifiers["type"] = artifact.artifact_type
         purl = PackageURL(
             type="maven",
             namespace=artifact.group_id,
             name=artifact.artifact_id,
             version=artifact.version,
+            qualifiers=qualifiers or None,
         )
 
         name = f"{artifact.group_id}.{artifact.artifact_id}"
@@ -236,7 +247,10 @@ def _rewrite_url_for_proxy(url: str, proxy_url: str) -> str:
 
 
 def _download_maven_artifacts(
-    deps_dir: Path, artifacts: list[MavenArtifact], proxy_url: str | None = None
+    deps_dir: Path,
+    artifacts: list[MavenArtifact],
+    proxy_url: str | None = None,
+    proxy_auth: aiohttp.BasicAuth | None = None,
 ) -> None:
     """Download Maven dependencies."""
     config = get_config()
@@ -248,7 +262,9 @@ def _download_maven_artifacts(
     for a in artifacts:
         fetch_url = _rewrite_url_for_proxy(a.url, proxy_url) if proxy_url else a.url
         fetch_urls_to_path[fetch_url] = original_to_path[a.url]
-    asyncio.run(async_download_files(fetch_urls_to_path, config.runtime.concurrency_limit))
+    asyncio.run(
+        async_download_files(fetch_urls_to_path, config.runtime.concurrency_limit, auth=proxy_auth)
+    )
 
     _verify_checksums(artifacts, original_to_path)
     _verify_artifact_sizes(original_to_path)
@@ -257,8 +273,8 @@ def _download_maven_artifacts(
     if proxy_url:
         pom_files = {_rewrite_url_for_proxy(u, proxy_url): p for u, p in pom_files.items()}
         pom_checksums = {_rewrite_url_for_proxy(u, proxy_url): p for u, p in pom_checksums.items()}
-    asyncio.run(async_download_files(pom_files, config.runtime.concurrency_limit))
-    asyncio.run(_async_download_optional_files(pom_checksums))
+    asyncio.run(async_download_files(pom_files, config.runtime.concurrency_limit, auth=proxy_auth))
+    asyncio.run(_async_download_optional_files(pom_checksums, auth=proxy_auth))
 
     _create_checksums_files(artifacts, original_to_path)
     _create_remote_repositories_files(deps_dir, artifacts)
@@ -292,19 +308,22 @@ def _prepare_pom_and_checksum_downloads(
     pom_checksums: dict[str, Path] = {}
 
     for artifact in artifacts:
+        if artifact.classifier:
+            continue
+        if artifact.artifact_type == "pom":
+            continue
+
         parsed_url = urlparse(artifact.url)
         url_path = Path(parsed_url.path)
+        pom_filename = derive_pom_filename(artifact.artifact_id, artifact.version)
+        pom_file_url = artifact.url.replace(url_path.name, pom_filename)
 
-        if url_path.suffix != ".pom":
-            pom_filename = derive_pom_filename(artifact.artifact_id, artifact.version)
-            pom_file_url = artifact.url.replace(url_path.name, pom_filename)
+        artifact_dir = deps_dir / artifact.artifact_relative_dir
+        pom_files[pom_file_url] = artifact_dir / pom_filename
 
-            artifact_dir = deps_dir / artifact.artifact_relative_dir
-            pom_files[pom_file_url] = artifact_dir / pom_filename
-
-            pom_checksum_url = f"{pom_file_url}.{artifact.algorithm}"
-            pom_checksum_path = artifact_dir / f"{pom_filename}.{artifact.algorithm}"
-            pom_checksums[pom_checksum_url] = pom_checksum_path
+        pom_checksum_url = f"{pom_file_url}.{artifact.algorithm}"
+        pom_checksum_path = artifact_dir / f"{pom_filename}.{artifact.algorithm}"
+        pom_checksums[pom_checksum_url] = pom_checksum_path
 
     return pom_files, pom_checksums
 
@@ -328,9 +347,11 @@ async def _download_optional_file(session: aiohttp.ClientSession, url: str, path
             path.write_bytes(content)
 
 
-async def _async_download_optional_files(files: dict[str, Path]) -> None:
+async def _async_download_optional_files(
+    files: dict[str, Path], auth: aiohttp.BasicAuth | None = None
+) -> None:
     """Download optional files, logging any errors without failing the build."""
-    async with aiohttp.ClientSession(trust_env=True) as session:
+    async with aiohttp.ClientSession(trust_env=True, auth=auth) as session:
         urls = list(files.keys())
         tasks = [_download_optional_file(session, url, files[url]) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -1,0 +1,85 @@
+{
+  "groupId": "org.keycloak",
+  "artifactId": "keycloak-core",
+  "version": "999.0.0-SNAPSHOT",
+  "lockFileVersion": 1,
+  "dependencies": [
+    {
+      "groupId": "com.fasterxml.jackson.core",
+      "artifactId": "jackson-core",
+      "version": "2.21.2",
+      "checksumAlgorithm": "SHA-256",
+      "checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scope": "compile",
+      "resolved": "https://repo.maven.apache.org/maven2/com/fasterxml/jackson/core/jackson-core/2.21.2/jackson-core-2.21.2.jar",
+      "repositoryId": "central",
+      "included": true,
+      "children": [],
+      "boms": []
+    },
+    {
+      "groupId": "org.keycloak",
+      "artifactId": "keycloak-common",
+      "version": "999.0.0-SNAPSHOT",
+      "checksumAlgorithm": "SHA-256",
+      "checksum": "",
+      "scope": "compile",
+      "resolved": "",
+      "repositoryId": "",
+      "included": true,
+      "children": [
+        {
+          "groupId": "jakarta.activation",
+          "artifactId": "jakarta.activation-api",
+          "version": "2.1.4",
+          "checksumAlgorithm": "SHA-256",
+          "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "scope": "compile",
+          "resolved": "https://repo.maven.apache.org/maven2/jakarta/activation/jakarta.activation-api/2.1.4/jakarta.activation-api-2.1.4.jar",
+          "repositoryId": "central",
+          "included": true,
+          "children": [],
+          "boms": []
+        }
+      ],
+      "boms": []
+    }
+  ],
+  "mavenPlugins": [
+    {
+      "groupId": "org.keycloak",
+      "artifactId": "keycloak-maven-plugin",
+      "version": "999.0.0-SNAPSHOT",
+      "checksumAlgorithm": "SHA-256",
+      "checksum": "",
+      "resolved": "",
+      "repositoryId": "",
+      "dependencies": [
+        {
+          "groupId": "org.apache.maven",
+          "artifactId": "maven-plugin-api",
+          "version": "3.9.6",
+          "checksumAlgorithm": "SHA-256",
+          "checksum": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "scope": "compile",
+          "resolved": "https://repo.maven.apache.org/maven2/org/apache/maven/maven-plugin-api/3.9.6/maven-plugin-api-3.9.6.jar",
+          "repositoryId": "central",
+          "included": true,
+          "children": [],
+          "boms": []
+        }
+      ]
+    }
+  ],
+  "mavenExtensions": [
+    {
+      "groupId": "org.keycloak",
+      "artifactId": "keycloak-build-ext",
+      "version": "999.0.0-SNAPSHOT",
+      "checksumAlgorithm": "SHA-256",
+      "checksum": "",
+      "resolved": "",
+      "repositoryId": ""
+    }
+  ]
+}

@@ -95,6 +95,8 @@ class MavenArtifact(UserDict):
         self.checksum_algorithm = data["checksumAlgorithm"]
         self.checksum = data["checksum"]
         self.algorithm = get_checksum_algorithm(data["checksumAlgorithm"])
+        self.classifier = data.get("classifier")
+        self.artifact_type = data.get("type")
         super().__init__(data)
 
     @property
@@ -110,20 +112,65 @@ class MavenArtifact(UserDict):
         return Path(group_dir) / self.artifact_id / self.version
 
 
+_MAX_TREE_DEPTH = 100
+
+
+def _is_reactor_artifact(entry: dict[str, Any]) -> bool:
+    """Return True if the entry is a reactor artifact (resolved URL present but empty)."""
+    return "resolved" in entry and not entry["resolved"]
+
+
+def _log_skipped_reactor(kind: str, entry: dict[str, Any]) -> None:
+    log.info(
+        "Skipping reactor %s %s:%s:%s (built from source, no remote URL)",
+        kind,
+        entry.get("groupId", "?"),
+        entry.get("artifactId", "?"),
+        entry.get("version", "?"),
+    )
+
+
 def _parse_dependency_tree(
     dependencies: list[MavenArtifact], children: list[dict[str, Any]]
 ) -> None:
-    """Recursively parse dependency tree."""
-    for child in children:
-        dependencies.append(MavenArtifact(child))
-        _parse_dependency_tree(dependencies, child.get("children", []))
+    """Parse dependency tree iteratively with depth cap and included filtering."""
+    stack: list[tuple[dict[str, Any], int]] = [(c, 0) for c in reversed(children)]
+    while stack:
+        child, depth = stack.pop()
+        if depth > _MAX_TREE_DEPTH:
+            raise InvalidLockfileFormat(
+                "lockfile.json",
+                f"dependency tree exceeds maximum depth of {_MAX_TREE_DEPTH}",
+                solution="The lockfile may contain circular references. "
+                "Regenerate with: mvn io.github.chains-project:maven-lockfile:generate",
+            )
+        if _is_reactor_artifact(child):
+            _log_skipped_reactor("dependency", child)
+        elif child.get("included", True):
+            dependencies.append(MavenArtifact(child))
+        # Always recurse: a reactor/excluded node's children may be external deps
+        for grandchild in reversed(child.get("children", [])):
+            stack.append((grandchild, depth + 1))
 
 
 def _parse_bom_tree(boms: list[MavenArtifact], children: list[dict[str, Any]]) -> None:
-    """Recursively parse BOM tree."""
-    for child in children:
+    """Parse BOM tree iteratively with depth cap."""
+    stack: list[tuple[dict[str, Any], int]] = [(c, 0) for c in reversed(children)]
+    while stack:
+        child, depth = stack.pop()
+        if depth > _MAX_TREE_DEPTH:
+            raise InvalidLockfileFormat(
+                "lockfile.json",
+                f"BOM tree exceeds maximum depth of {_MAX_TREE_DEPTH}",
+                solution="The lockfile may contain circular references. "
+                "Regenerate with: mvn io.github.chains-project:maven-lockfile:generate",
+            )
+        if _is_reactor_artifact(child):
+            _log_skipped_reactor("BOM", child)
+            continue
         boms.append(MavenArtifact(child))
-        _parse_bom_tree(boms, child.get("boms", []))
+        for grandchild in reversed(child.get("boms", [])):
+            stack.append((grandchild, depth + 1))
 
 
 def parse_maven_dependencies(lockfile: MavenLockfile) -> list[MavenArtifact]:
@@ -138,7 +185,10 @@ def parse_maven_plugins(lockfile: MavenLockfile) -> list[MavenArtifact]:
     plugins: list[MavenArtifact] = []
     dependencies: list[MavenArtifact] = []
     for plugin in lockfile.data.get("mavenPlugins", []):
-        plugins.append(MavenArtifact(plugin))
+        if _is_reactor_artifact(plugin):
+            _log_skipped_reactor("plugin", plugin)
+        else:
+            plugins.append(MavenArtifact(plugin))
         _parse_dependency_tree(dependencies, plugin.get("dependencies", []))
 
     return plugins + dependencies
@@ -151,3 +201,14 @@ def parse_maven_boms(dependencies: list[MavenArtifact]) -> list[MavenArtifact]:
         _parse_bom_tree(boms, dependency.get("boms", []))
 
     return boms
+
+
+def parse_maven_extensions(lockfile: MavenLockfile) -> list[MavenArtifact]:
+    """Parse extensions from the lockfile to a flat list."""
+    extensions: list[MavenArtifact] = []
+    for ext in lockfile.data.get("mavenExtensions", []):
+        if _is_reactor_artifact(ext):
+            _log_skipped_reactor("extension", ext)
+        else:
+            extensions.append(MavenArtifact(ext))
+    return extensions

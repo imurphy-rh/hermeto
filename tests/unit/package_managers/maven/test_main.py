@@ -268,6 +268,50 @@ class TestGenerateSbomComponents:
         assert "com.google.guava.guava" in names
 
 
+class TestGenerateSbomComponentsClassifierAndType:
+    def test_classifier_in_purl(self) -> None:
+        artifact = make_artifact(
+            classifier="sources",
+            resolved="https://repo.maven.apache.org/maven2/org/example/foo/1.0.0/foo-1.0.0-sources.jar",
+        )
+        components = _generate_sbom_components([artifact])
+        assert "classifier=sources" in components[0].purl
+
+    def test_no_classifier_no_qualifier(self) -> None:
+        components = _generate_sbom_components([make_artifact()])
+        assert "classifier=" not in components[0].purl
+
+    def test_type_war_in_purl(self) -> None:
+        artifact = make_artifact(type="war")
+        components = _generate_sbom_components([artifact])
+        assert "type=war" in components[0].purl
+
+    def test_type_jar_omitted_from_purl(self) -> None:
+        artifact = make_artifact(type="jar")
+        components = _generate_sbom_components([artifact])
+        assert "type=" not in components[0].purl
+
+    def test_no_type_no_qualifier(self) -> None:
+        components = _generate_sbom_components([make_artifact()])
+        assert "type=" not in components[0].purl
+
+    def test_classifier_and_type_combined(self) -> None:
+        artifact = make_artifact(classifier="sources", type="war")
+        components = _generate_sbom_components([artifact])
+        assert "classifier=sources" in components[0].purl
+        assert "type=war" in components[0].purl
+
+    def test_empty_string_classifier_ignored(self) -> None:
+        artifact = make_artifact(classifier="")
+        components = _generate_sbom_components([artifact])
+        assert "classifier=" not in components[0].purl
+
+    def test_empty_string_type_ignored(self) -> None:
+        artifact = make_artifact(type="")
+        components = _generate_sbom_components([artifact])
+        assert "type=" not in components[0].purl
+
+
 class TestGenerateMainComponent:
     def test_basic(self) -> None:
         lockfile = MavenLockfile(
@@ -348,11 +392,36 @@ class TestPreparePomAndChecksumDownloads:
 
     def test_pom_artifact_skipped(self, tmp_path: Path) -> None:
         artifact = make_artifact(
-            resolved="https://repo.maven.apache.org/maven2/org/example/foo/1.0.0/foo-1.0.0.pom"
+            resolved="https://repo.maven.apache.org/maven2/org/example/foo/1.0.0/foo-1.0.0.pom",
+            type="pom",
         )
         poms, checksums = _prepare_pom_and_checksum_downloads(tmp_path, [artifact])
         assert len(poms) == 0
         assert len(checksums) == 0
+
+    def test_classified_artifact_skipped(self, tmp_path: Path) -> None:
+        artifact = make_artifact(
+            classifier="sources",
+            resolved="https://repo.maven.apache.org/maven2/org/example/foo/1.0.0/foo-1.0.0-sources.jar",
+        )
+        poms, checksums = _prepare_pom_and_checksum_downloads(tmp_path, [artifact])
+        assert len(poms) == 0
+        assert len(checksums) == 0
+
+    def test_empty_classifier_gets_pom(self, tmp_path: Path) -> None:
+        artifact = make_artifact(classifier="")
+        poms, checksums = _prepare_pom_and_checksum_downloads(tmp_path, [artifact])
+        assert len(poms) == 1
+
+    def test_type_war_gets_pom(self, tmp_path: Path) -> None:
+        artifact = make_artifact(
+            type="war",
+            resolved="https://repo.maven.apache.org/maven2/org/example/foo/1.0.0/foo-1.0.0.war",
+        )
+        poms, checksums = _prepare_pom_and_checksum_downloads(tmp_path, [artifact])
+        assert len(poms) == 1
+        pom_url = list(poms.keys())[0]
+        assert pom_url.endswith("foo-1.0.0.pom")
 
     def test_multiple_artifacts(self, tmp_path: Path) -> None:
         a1 = make_artifact()
@@ -528,6 +597,34 @@ class TestSbomComponentsWithProxy:
         assert len(refs) == 1
         assert refs[0].url == "https://proxy.example.com"
         assert refs[0].type == "distribution"
+
+
+class TestProxyAuth:
+    @patch("hermeto.core.package_managers.maven.main._async_download_optional_files")
+    @patch("hermeto.core.package_managers.maven.main.async_download_files")
+    @patch("hermeto.core.package_managers.maven.main.get_config")
+    def test_proxy_auth_forwarded_to_downloads(
+        self,
+        mock_config: MagicMock,
+        mock_download: MagicMock,
+        mock_optional: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        mock_config.return_value.runtime.concurrency_limit = 5
+        artifact = make_artifact()
+
+        artifact_dir = tmp_path / "org" / "example" / "foo" / "1.0.0"
+        artifact_dir.mkdir(parents=True)
+        jar_path = artifact_dir / "foo-1.0.0.jar"
+        jar_path.write_bytes(b"fake jar")
+
+        proxy_auth = aiohttp.BasicAuth("user", "pass")
+
+        with patch("hermeto.core.package_managers.maven.main.must_match_any_checksum"):
+            _download_maven_artifacts(tmp_path, [artifact], "https://proxy.example.com", proxy_auth)
+
+        for call in mock_download.call_args_list:
+            assert call.kwargs.get("auth") is proxy_auth or call[1].get("auth") is proxy_auth
 
 
 class TestSettingsXmlTemplate:
